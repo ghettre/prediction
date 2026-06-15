@@ -169,49 +169,98 @@ def fetch_all_rows(table: str) -> list[dict]:
     return rows
 
 def sync_to_zz():
-    import json
-    # Fetch existing from zz
+    """
+    تزامن بيانات الجداول الأربعة مع الجدول الرئيسي zz.
+    - سطر جديد  → INSERT
+    - سطر مُعدَّل في الجدول الأصلي → PATCH (تحديث) في zz
+    - سطر غير مُعدَّل → لا شيء
+    """
+    from urllib.parse import quote
+
+    COMPARE_FIELDS = [
+        "sales_jour", "stock_fin_jour",
+        "shipment_received", "delivery_days", "stock_status"
+    ]
+
+    # 1️⃣ اقرأ كل سجلات zz وضعها في قاموس (date, product) → row
     zz_rows = fetch_all_rows("zz")
-    zz_keys = set()
+    zz_map: dict[tuple, dict] = {}
     for row in zz_rows:
         date = str(row.get("date", "")).strip()
         product = str(row.get("product", "")).strip()
         if date and product:
-            zz_keys.add((date, product))
-            
-    # Fetch from source tables
-    new_rows = []
-    for t in SOURCE_TABLES:
-        source_rows = fetch_all_rows(t)
-        for row in source_rows:
+            zz_map[(date, product)] = row
+
+    rows_to_insert: list[dict] = []
+    rows_to_patch: list[tuple[str, str, dict]] = []  # (date, product, fields)
+
+    # 2️⃣ جلب البيانات من الجداول الأربعة ومقارنتها مع zz
+    for table in SOURCE_TABLES:
+        for row in fetch_all_rows(table):
             date = str(row.get("date", "")).strip()
             product = str(row.get("product", "")).strip()
-            if date and product and (date, product) not in zz_keys:
-                row_copy = row.copy()
-                row_copy.pop("id", None)  # Let zz generate its own id
-                new_rows.append(row_copy)
-                zz_keys.add((date, product))
-                
-    if new_rows:
-        batch_size = 1000
-        for i in range(0, len(new_rows), batch_size):
-            batch = new_rows[i:i+batch_size]
+            if not date or not product:
+                continue
+
+            key = (date, product)
+            row_clean = row.copy()
+            row_clean.pop("id", None)
+
+            if key not in zz_map:
+                # سطر جديد كليّاً → إدراج
+                rows_to_insert.append(row_clean)
+                zz_map[key] = row_clean  # تجنب تكرار الإدراج
+            else:
+                # سطر موجود → تحقق من التعديلات
+                existing = zz_map[key]
+                changed_fields = {
+                    f: row.get(f)
+                    for f in COMPARE_FIELDS
+                    if str(row.get(f, "")).strip() != str(existing.get(f, "")).strip()
+                }
+                if changed_fields:
+                    rows_to_patch.append((date, product, changed_fields))
+                    zz_map[key] = row_clean  # تحديث الكاش المحلي
+
+    # 3️⃣ إدراج السجلات الجديدة (دفعات)
+    if rows_to_insert:
+        for i in range(0, len(rows_to_insert), 500):
+            batch = rows_to_insert[i:i + 500]
             url = f"{SUPABASE_URL}/rest/v1/zz"
             headers = get_headers()
             headers["Prefer"] = "return=minimal"
             data = json.dumps(batch).encode("utf-8")
             req = urllib_request.Request(url, data=data, headers=headers, method="POST")
             try:
-                with urllib_request.urlopen(req, timeout=60) as response:
+                with urllib_request.urlopen(req, timeout=60):
                     pass
             except urllib_error.HTTPError as exc:
-                print(f"Failed to insert into zz: {exc.read().decode('utf-8')}")
+                raise RuntimeError(f"Insert to zz failed: {exc.read().decode()}") from exc
+
+    # 4️⃣ تحديث السجلات المُعدَّلة (كل سطر بطلب PATCH منفصل)
+    for date, product, fields in rows_to_patch:
+        url = (
+            f"{SUPABASE_URL}/rest/v1/zz"
+            f"?date=eq.{quote(date)}&product=eq.{quote(product)}"
+        )
+        headers = get_headers()
+        headers["Prefer"] = "return=minimal"
+        data = json.dumps(fields).encode("utf-8")
+        req = urllib_request.Request(url, data=data, headers=headers, method="PATCH")
+        try:
+            with urllib_request.urlopen(req, timeout=60):
+                pass
+        except urllib_error.HTTPError as exc:
+            raise RuntimeError(f"Patch in zz failed: {exc.read().decode()}") from exc
+
 
 def load_data() -> pd.DataFrame:
     sync_to_zz()
     all_rows = fetch_all_rows("zz")
     df = pd.DataFrame(all_rows)
     return clean_rows(df)
+
+
 
 
 def load_product_mapping(path: Path | str = MAPPING_PATH) -> dict[str, int]:
