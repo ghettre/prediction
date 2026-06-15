@@ -168,11 +168,48 @@ def fetch_all_rows(table: str) -> list[dict]:
 
     return rows
 
+def sync_to_zz():
+    import json
+    # Fetch existing from zz
+    zz_rows = fetch_all_rows("zz")
+    zz_keys = set()
+    for row in zz_rows:
+        date = str(row.get("date", "")).strip()
+        product = str(row.get("product", "")).strip()
+        if date and product:
+            zz_keys.add((date, product))
+            
+    # Fetch from source tables
+    new_rows = []
+    for t in SOURCE_TABLES:
+        source_rows = fetch_all_rows(t)
+        for row in source_rows:
+            date = str(row.get("date", "")).strip()
+            product = str(row.get("product", "")).strip()
+            if date and product and (date, product) not in zz_keys:
+                row_copy = row.copy()
+                row_copy.pop("id", None)  # Let zz generate its own id
+                new_rows.append(row_copy)
+                zz_keys.add((date, product))
+                
+    if new_rows:
+        batch_size = 1000
+        for i in range(0, len(new_rows), batch_size):
+            batch = new_rows[i:i+batch_size]
+            url = f"{SUPABASE_URL}/rest/v1/zz"
+            headers = get_headers()
+            headers["Prefer"] = "return=minimal"
+            data = json.dumps(batch).encode("utf-8")
+            req = urllib_request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with urllib_request.urlopen(req, timeout=60) as response:
+                    pass
+            except urllib_error.HTTPError as exc:
+                print(f"Failed to insert into zz: {exc.read().decode('utf-8')}")
 
 def load_data() -> pd.DataFrame:
-    all_rows = []
-    for t in SOURCE_TABLES:
-        all_rows.extend(fetch_all_rows(t))
+    sync_to_zz()
+    all_rows = fetch_all_rows("zz")
     df = pd.DataFrame(all_rows)
     return clean_rows(df)
 
