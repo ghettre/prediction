@@ -28,8 +28,26 @@ def load_dotenv():
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")
+import streamlit as st
+
+def get_supabase_credentials():
+    url = os.getenv("SUPABASE_URL", "")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")
+    
+    try:
+        if not url and "SUPABASE_URL" in st.secrets:
+            url = st.secrets["SUPABASE_URL"]
+        if not key:
+            if "SUPABASE_SERVICE_ROLE_KEY" in st.secrets:
+                key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+            elif "SUPABASE_ANON_KEY" in st.secrets:
+                key = st.secrets["SUPABASE_ANON_KEY"]
+    except Exception:
+        pass
+        
+    return url.rstrip("/"), key
+
+SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
 
 SOURCE_TABLES = ["headphones", "laptops", "phones", "tablets"]
 
